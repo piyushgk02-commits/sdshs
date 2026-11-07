@@ -44,6 +44,9 @@ Deno.serve(async (request) => {
   if (!callerProfile || callerProfile.status !== 'active' || !['Director', 'Principal'].includes(callerProfile.role)) {
     return jsonResponse({ error: 'Only active Directors and Principals may invite academic staff.' }, 403);
   }
+  const { data: managerAuthorized, error: authorizationError } = await callerClient.rpc('is_school_manager');
+  if (authorizationError) return jsonResponse({ error: 'Unable to verify administrator access.' }, 500);
+  if (!managerAuthorized) return jsonResponse({ error: 'Complete administrator email verification before managing staff.' }, 403);
 
   let body: Record<string, unknown>;
   try {
@@ -104,7 +107,7 @@ Deno.serve(async (request) => {
     if (parsedOrigin.protocol !== 'https:' && parsedOrigin.hostname !== 'localhost') {
       return jsonResponse({ error: 'The application origin must use HTTPS.' }, 400);
     }
-    redirectTo = new URL('/?flow=academic', parsedOrigin.origin).toString();
+    redirectTo = new URL('/?flow=academic-password', parsedOrigin.origin).toString();
   } catch {
     return jsonResponse({ error: 'The application origin is invalid.' }, 400);
   }

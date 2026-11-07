@@ -17,5 +17,8 @@
     "react-dom": "latest",
     "recharts": "^2.15.0",
     "vite": "latest"
+  },
+  "devDependencies": {
+    "supabase": "^3.0.0"
   }
 }

@@ -76,10 +76,8 @@ Deno.serve(async (request) => {
 
   const { data: authData, error: authError } = await callerClient.auth.getUser(accessToken);
   const authMethods = tokenClaims?.amr;
-  const usedGoogleOAuth = Array.isArray(authMethods)
-    && authMethods.some((method: { method?: string }) => method?.method === 'oauth');
-  const usedEmailOtp = Array.isArray(authMethods)
-    && authMethods.some((method: { method?: string }) => method?.method === 'otp');
+  const usedPassword = Array.isArray(authMethods)
+    && authMethods.some((method: { method?: string }) => method?.method === 'password');
   if (authError || !authData.user || tokenClaims?.sub !== authData.user.id
     || !authData.user.email || !authData.user.email_confirmed_at) {
     return jsonResponse({ error: 'A verified SCHOOL COMMAND staff session is required.' }, 403);
@@ -87,7 +85,7 @@ Deno.serve(async (request) => {
 
   const { data: profile, error: profileError } = await adminClient
     .from('staff_profiles')
-    .select('email, role, status, google_login_allowed, assigned_class, assigned_section')
+    .select('email, role, status, assigned_class, assigned_section')
     .eq('user_id', authData.user.id)
     .maybeSingle();
   if (profileError) return jsonResponse({ error: 'Unable to verify staff access.' }, 500);
@@ -100,7 +98,7 @@ Deno.serve(async (request) => {
   }
 
   const adminActions = ['status', 'send', 'verify', 'logout'];
-  const academicActions = ['academic-status', 'academic-logout'];
+  const academicActions = ['academic-password-status', 'academic-password-logout'];
   if (![...adminActions, ...academicActions].includes(String(body.action))) {
     return jsonResponse({ error: 'Unsupported verification action.' }, 400);
   }
@@ -111,19 +109,11 @@ Deno.serve(async (request) => {
   }
 
   if (adminActions.includes(String(body.action))) {
-    const hasGoogleIdentity = authData.user.identities?.some((identity) => {
-      const identityEmail = identity.identity_data?.email;
-      const emailVerified = identity.identity_data?.email_verified;
-      return identity.provider === 'google'
-        && typeof identityEmail === 'string'
-        && identityEmail.toLowerCase() === authData.user.email?.toLowerCase()
-        && (emailVerified === true || emailVerified === 'true');
-    });
-    if (!hasGoogleIdentity || !profile.google_login_allowed
-      || !['Director', 'Principal'].includes(profile.role)) {
+    if (!usedPassword || !['Director', 'Principal'].includes(profile.role)) {
       return jsonResponse({ error: 'This account is not authorized for administrator access.' }, 403);
     }
   } else if (!['Class Coordinator', 'Class Teacher'].includes(profile.role)
+    || !usedPassword
     || !Number.isInteger(profile.assigned_class)
     || profile.assigned_class < 1
     || profile.assigned_class > 12
@@ -132,9 +122,9 @@ Deno.serve(async (request) => {
     return jsonResponse({ error: 'This account is not authorized for academic staff access.' }, 403);
   }
 
-  if (body.action === 'academic-status') {
-    if (usedEmailOtp) {
-      const { error } = await adminClient.from('academic_email_otp_sessions').upsert({
+  if (body.action === 'academic-password-status') {
+    if (usedPassword) {
+      const { error } = await adminClient.from('academic_password_sessions').upsert({
         auth_session_id: authSessionId,
         user_id: authData.user.id,
         verified_at: new Date().toISOString(),
@@ -144,7 +134,7 @@ Deno.serve(async (request) => {
     }
 
     const { data: grant, error } = await adminClient
-      .from('academic_email_otp_sessions')
+      .from('academic_password_sessions')
       .select('expires_at')
       .eq('auth_session_id', authSessionId)
       .eq('user_id', authData.user.id)
@@ -155,9 +145,9 @@ Deno.serve(async (request) => {
     return jsonResponse({ verified: Boolean(grant) });
   }
 
-  if (body.action === 'academic-logout') {
+  if (body.action === 'academic-password-logout') {
     const { error } = await adminClient
-      .from('academic_email_otp_sessions')
+      .from('academic_password_sessions')
       .update({ revoked_at: new Date().toISOString() })
       .eq('auth_session_id', authSessionId)
       .eq('user_id', authData.user.id)
@@ -208,20 +198,6 @@ Deno.serve(async (request) => {
     const emailFrom = Deno.env.get('MFA_EMAIL_FROM');
     if (!pepper || !resendApiKey || !emailFrom) {
       return jsonResponse({ error: 'Administrator email verification is not configured.' }, 503);
-    }
-
-    const { data: existingChallenge, error: challengeError } = await adminClient
-      .from('admin_email_mfa_challenges')
-      .select('id')
-      .eq('auth_session_id', authSessionId)
-      .eq('user_id', authData.user.id)
-      .is('used_at', null)
-      .gt('expires_at', new Date().toISOString())
-      .limit(1)
-      .maybeSingle();
-    if (challengeError) return jsonResponse({ error: 'Unable to issue a verification code.' }, 500);
-    if (!usedGoogleOAuth && !existingChallenge) {
-      return jsonResponse({ error: 'Start a new Google sign-in to request a verification code.' }, 403);
     }
 
     const code = createCode();

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity, Archive, ArrowDownLeft, ArrowUpRight, Bell, Bus, CalendarCheck, Check, ChevronDown, Chrome,
+  Activity, Archive, ArrowDownLeft, ArrowUpRight, Bell, Bus, CalendarCheck, Check, ChevronDown,
   ChevronLeft, ChevronRight, CircleHelp, ClipboardCheck, Clock3, Download, FileChartColumn,
   FileText, GraduationCap, LayoutDashboard, Menu, MoreHorizontal, Package, Plus, Search,
   LogOut, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, UserRoundCog, Users, Wallet, Wrench, X, XCircle,
@@ -12,7 +12,7 @@ import {
 } from 'recharts';
 import { loadDemoState, money, number } from './data.js';
 import {
-  requestAdminEmailOtp, revokeAcademicEmailSession, revokeAdminEmailSession, sessionFromAuth,
+  requestAdminEmailOtp, revokeAcademicPasswordSession, revokeAdminEmailSession, sessionFromAuth,
   setRememberSession, supabase, supabaseConfigured, verifyAdminEmailOtp,
 } from './supabase.js';
 
@@ -41,9 +41,14 @@ function App() {
   const [authReady, setAuthReady] = useState(!supabaseConfigured);
   const [authError, setAuthError] = useState('');
   const [adminMfaPending, setAdminMfaPending] = useState(false);
-  const [invitationRedirect] = useState(() => new URLSearchParams(window.location.search).get('flow') === 'academic');
-  const invitationRedirectRef = useRef(invitationRedirect);
-  const invitationCleanupRef = useRef(null);
+  const [passwordSetupMode, setPasswordSetupMode] = useState(() => {
+    const flow = new URLSearchParams(window.location.search).get('flow');
+    if (flow === 'academic' || flow === 'academic-password') return 'set-password';
+    if (flow === 'password-reset') return 'reset-password';
+    return '';
+  });
+  const [passwordSetupEmail, setPasswordSetupEmail] = useState('');
+  const passwordSetupModeRef = useRef(Boolean(passwordSetupMode));
   const [page, setPage] = useState('overview');
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState('All');
@@ -74,13 +79,8 @@ function App() {
     if (!supabaseConfigured) return undefined;
     let active = true;
     let authRequest = 0;
-    if (invitationRedirect) {
-      const url = new URL(window.location.href);
-      url.searchParams.delete('flow');
-      window.history.replaceState(window.history.state, '', url);
-    }
     const resolveSession = async (authSession) => {
-      if (invitationRedirectRef.current) return;
+      if (passwordSetupModeRef.current) return;
       const requestNumber = ++authRequest;
       try {
         const result = authSession ? await sessionFromAuth(authSession) : null;
@@ -112,20 +112,23 @@ function App() {
       window.setTimeout(() => { void resolveSession(authSession); }, 0);
     });
     const initializeSession = async () => {
-      if (invitationRedirect) {
+      if (passwordSetupModeRef.current) {
         const url = new URL(window.location.href);
         url.searchParams.delete('flow');
         window.history.replaceState(window.history.state, '', url);
         try {
-          invitationCleanupRef.current ||= supabase.auth.signOut({ scope: 'local' });
-          const { error } = await invitationCleanupRef.current;
+          const { data: result, error } = await supabase.auth.getSession();
           if (error) throw error;
           if (!active) return;
-          invitationRedirectRef.current = false;
+          if (!result.session?.user?.email) {
+            setAuthError('This password setup link is invalid or expired. Request a new staff invitation or password reset.');
+          } else {
+            setPasswordSetupEmail(result.session.user.email);
+          }
           setAuthReady(true);
         } catch {
           if (active) {
-            setAuthError('Unable to finish invitation sign-in. Request an academic staff code to continue.');
+            setAuthError('Unable to verify this password setup link. Request a new invitation or password reset.');
             setAuthReady(true);
           }
         }
@@ -135,7 +138,7 @@ function App() {
       const callbackParams = new URLSearchParams(window.location.search);
       const callbackHash = new URLSearchParams(window.location.hash.slice(1));
       if (callbackParams.has('error') || callbackHash.has('error')) {
-        setAuthError('Google sign-in was cancelled or could not be completed. Please try again.');
+        setAuthError('Sign-in could not be completed. Please try again.');
         callbackParams.delete('error');
         callbackParams.delete('error_code');
         callbackParams.delete('error_description');
@@ -165,7 +168,7 @@ function App() {
       authRequest += 1;
       subscription.unsubscribe();
     };
-  }, [invitationRedirect]);
+  }, []);
 
   useEffect(() => {
     if (!toast) return undefined;
@@ -187,65 +190,58 @@ function App() {
     setData((current) => ({ ...current, audit: [{ id: `AU-${Date.now()}`, user: `${session?.name || 'Demo'} · ${session?.role || 'Demo'}`, action, record, time: new Date().toLocaleString('en-IN') }, ...current.audit] }));
   };
 
-  const loginWithGoogle = async (remember) => {
+  const loginWithPassword = async ({ email, password, remember }) => {
     if (!supabaseConfigured) return 'Secure sign-in is unavailable until Supabase is configured.';
     setRememberSession(remember);
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: { redirectTo: window.location.origin },
+    const { data: result, error } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password,
     });
-    return error ? 'Google sign-in could not be started. Please try again.' : '';
-  };
-
-  const requestAcademicOtp = async (email) => {
-    if (!supabaseConfigured) return 'Secure sign-in is unavailable until Supabase is configured.';
-    setRememberSession(false);
-    const { error } = await supabase.auth.signInWithOtp({
-      email,
-      options: { shouldCreateUser: false },
-    });
-    if (error) return 'Unable to send a verification code right now. Check the email address or try again later.';
-    return '';
-  };
-
-  const verifyAcademicOtp = async ({ email, token }) => {
-    if (!supabaseConfigured) return 'Secure sign-in is unavailable until Supabase is configured.';
-    const { data: result, error } = await supabase.auth.verifyOtp({ email, token, type: 'email' });
-    if (error || !result.session || !result.user) {
-      return 'That code could not be verified. Check it or request a new code.';
-    }
-
+    if (error || !result.session) return 'Email or password is incorrect.';
     try {
-      const { data: sessionResult, error: sessionError } = await supabase.auth.getSession();
-      if (sessionError) throw sessionError;
-      const authSession = sessionResult.session;
-      if (!authSession || authSession.user.id !== result.user.id) {
-        throw new Error('The verified authentication session is unavailable.');
+      const nextSession = await sessionFromAuth(result.session);
+      if (nextSession?.pendingMfa) {
+        setSession(null);
+        setAdminMfaPending(true);
+        setAuthError('');
+        return '';
       }
-      const nextSession = await sessionFromAuth(authSession);
-      if (!nextSession || nextSession.pendingMfa
-        || !['Class Coordinator', 'Class Teacher'].includes(nextSession.role)) {
+      if (!nextSession) {
         await supabase.auth.signOut({ scope: 'local' });
-        return 'Academic Staff Login is available only to active, assigned Class Coordinators and Class Teachers.';
+        return 'This account is not active or assigned to SCHOOL COMMAND.';
       }
-      invitationRedirectRef.current = false;
       setSession(nextSession);
+      setAdminMfaPending(false);
       setAuthError('');
-      setData((current) => ({
-        ...current,
-        audit: [{
-          id: `AU-${Date.now()}`,
-          user: `${nextSession.name} · ${nextSession.role}`,
-          action: 'authenticated sign-in',
-          record: 'Supabase email OTP',
-          time: new Date().toLocaleString('en-IN'),
-        }, ...current.audit],
-      }));
       return '';
     } catch {
       await supabase.auth.signOut({ scope: 'local' });
-      return 'Unable to verify your staff assignment. Please try again.';
+      return 'Unable to verify your account or staff assignment. Please try again.';
     }
+  };
+
+  const requestPasswordReset = async (email) => {
+    if (!supabaseConfigured) return 'Secure sign-in is unavailable until Supabase is configured.';
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+      redirectTo: new URL('/?flow=password-reset', window.location.origin).toString(),
+    });
+    return error
+      ? 'Unable to send a password reset email. Please try again later.'
+      : 'If this address belongs to an account, password reset instructions will be sent.';
+  };
+
+  const finishPasswordSetup = async (password) => {
+    if (!supabaseConfigured) return 'Secure sign-in is unavailable until Supabase is configured.';
+    const { data: current, error: sessionError } = await supabase.auth.getSession();
+    if (sessionError || !current.session) return 'This password setup link is invalid or expired.';
+    const { error } = await supabase.auth.updateUser({ password });
+    if (error) return 'Unable to set this password. Use at least 10 characters and try again.';
+    const { error: signOutError } = await supabase.auth.signOut({ scope: 'local' });
+    if (signOutError) return 'Password saved, but sign-out failed. Close this browser session before signing in.';
+    passwordSetupModeRef.current = false;
+    setPasswordSetupMode('');
+    setAuthError('Password saved. Sign in with your email and password.');
+    return '';
   };
 
   const requestAdminOtp = async () => requestAdminEmailOtp();
@@ -270,7 +266,7 @@ function App() {
           id: `AU-${Date.now()}`,
           user: `${nextSession.name} · ${nextSession.role}`,
           action: 'authenticated sign-in with email verification',
-          record: 'Google OAuth and email OTP',
+          record: 'Email and password with email OTP',
           time: new Date().toLocaleString('en-IN'),
         }, ...current.audit],
       }));
@@ -298,7 +294,7 @@ function App() {
     const sessionInvalidationError = session && ['Director', 'Principal'].includes(session.role)
       ? await revokeAdminEmailSession()
       : session && ['Class Coordinator', 'Class Teacher'].includes(session.role)
-        ? await revokeAcademicEmailSession()
+        ? await revokeAcademicPasswordSession()
         : '';
     let signOutError = '';
     try {
@@ -450,13 +446,14 @@ function App() {
   if (!session) return <LoginScreen
     authEnabled={supabaseConfigured}
     authError={authError}
-    initialMode={adminMfaPending ? 'admin-mfa' : invitationRedirect ? 'academic-email' : 'choice'}
-    onGoogleLogin={loginWithGoogle}
+    initialMode={passwordSetupMode || (adminMfaPending ? 'admin-mfa' : 'login')}
+    initialEmail={passwordSetupEmail}
+    onSignIn={loginWithPassword}
     onRequestAdminOtp={requestAdminOtp}
     onVerifyAdminOtp={verifyAdminOtp}
     onCancelAdminOtp={cancelAdminOtp}
-    onRequestAcademicOtp={requestAcademicOtp}
-    onVerifyAcademicOtp={verifyAcademicOtp}
+    onRequestPasswordReset={requestPasswordReset}
+    onFinishPasswordSetup={finishPasswordSetup}
   />;
   if (['Class Coordinator', 'Class Teacher'].includes(session.role)) {
     return <AcademicDashboard session={session} supabase={supabase} onLogout={logout} />;
@@ -533,11 +530,13 @@ function pageLabel(page) {
 }
 
 function LoginScreen({
-  authEnabled, authError, initialMode, onGoogleLogin, onRequestAdminOtp, onVerifyAdminOtp,
-  onCancelAdminOtp, onRequestAcademicOtp, onVerifyAcademicOtp,
+  authEnabled, authError, initialMode, initialEmail, onSignIn, onRequestAdminOtp, onVerifyAdminOtp,
+  onCancelAdminOtp, onRequestPasswordReset, onFinishPasswordSetup,
 }) {
   const [mode, setMode] = useState(initialMode);
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState(initialEmail || '');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [remember, setRemember] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(authError || '');
@@ -554,19 +553,60 @@ function LoginScreen({
   }, [initialMode]);
 
   useEffect(() => {
+    if (initialEmail) setEmail(initialEmail);
+  }, [initialEmail]);
+
+  useEffect(() => {
     if (!resendCooldown) return undefined;
     const timer = window.setTimeout(() => setResendCooldown((value) => Math.max(0, value - 1)), 1000);
     return () => window.clearTimeout(timer);
   }, [resendCooldown]);
 
-  const signInWithGoogle = async () => {
+  const signIn = async (event) => {
+    event.preventDefault();
     setBusy(true);
     setError('');
     try {
-      const result = await onGoogleLogin(remember);
+      const result = await onSignIn({ email, password, remember });
       if (result) setError(result);
     } catch {
-      setError('Unable to start Google sign-in right now. Please try again.');
+      setError('Unable to sign in right now. Please try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const requestPasswordReset = async (event) => {
+    event.preventDefault();
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      setNotice(await onRequestPasswordReset(email));
+    } catch {
+      setError('Unable to send password reset instructions right now. Please try again later.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const finishPasswordSetup = async (event) => {
+    event.preventDefault();
+    if (password.length < 10) {
+      setError('Use a password with at least 10 characters.');
+      return;
+    }
+    if (password !== confirmPassword) {
+      setError('The passwords do not match.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const result = await onFinishPasswordSetup(password);
+      if (result) setError(result);
+    } catch {
+      setError('Unable to set the password. Request a new invitation or reset link.');
     } finally {
       setBusy(false);
     }
@@ -587,28 +627,6 @@ function LoginScreen({
       setBusy(false);
     }
   };
-  const requestCode = async (event) => {
-    event.preventDefault();
-    setBusy(true);
-    setResendCooldown(30);
-    setError('');
-    setNotice('');
-    try {
-      const result = await onRequestAcademicOtp(email.trim());
-      if (result) {
-        setError(result);
-      } else {
-        setMode('academic-code');
-        setCode('');
-        setNotice('If this address is invited and active, a verification code will be sent.');
-      }
-    } catch {
-      setError('Unable to send a verification code right now. Check the email address or try again later.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const verifyCode = async (event) => {
     event.preventDefault();
     if (!/^\d{6}$/.test(code)) {
@@ -619,9 +637,7 @@ function LoginScreen({
     setError('');
     setNotice('');
     try {
-      const result = mode === 'admin-mfa'
-        ? await onVerifyAdminOtp(code)
-        : await onVerifyAcademicOtp({ email: email.trim(), token: code });
+      const result = await onVerifyAdminOtp(code);
       if (result) setError(result);
     } catch {
       setError('Unable to verify the code right now. Please try again.');
@@ -630,38 +646,32 @@ function LoginScreen({
     }
   };
 
-  const backToChoices = () => {
-    setMode('choice');
+  const backToLogin = () => {
+    setMode('login');
     setError('');
     setNotice('');
     setCode('');
   };
 
+  const passwordMode = mode === 'set-password' || mode === 'reset-password';
+
   return <main className="login-page">
     <section className="login-card" aria-labelledby="login-heading">
       <div className="login-brand"><div className="brand-mark"><span>SD</span><i /></div><div><b>SCHOOL<span>COMMAND</span></b><small>ST DOMINIC SAVIO'S HIGH SCHOOL</small></div></div>
       <div className="login-demo-label"><span className="live-dot" /> SECURE SCHOOL ACCESS</div>
-      <h1 id="login-heading">{mode === 'choice' ? 'Sign in to SCHOOL COMMAND' : mode === 'administrator' ? 'Administrator Login' : mode === 'admin-mfa' ? 'Verify administrator sign-in' : mode === 'academic-code' ? 'Verify your email' : 'Academic Staff Login'}</h1>
-      <p className="login-description">{mode === 'admin-mfa' ? 'Enter the six-digit code sent to your authorized administrator email.' : mode === 'academic-code' ? `Enter the six-digit code sent to ${email}.` : 'St Dominic Savio’s High School'}</p>
+      <h1 id="login-heading">{mode === 'admin-mfa' ? 'Verify administrator sign-in' : mode === 'forgot-password' ? 'Reset your password' : passwordMode ? 'Set your password' : 'Sign in to SCHOOL COMMAND'}</h1>
+      <p className="login-description">{mode === 'admin-mfa' ? 'Enter the six-digit code sent to your administrator email.' : passwordMode ? `Create a password for ${email || 'your invited account'}.` : 'St Dominic Savio’s High School'}</p>
       {!authEnabled && <div className="login-config-notice" role="status"><ShieldCheck size={17} /><span>Secure sign-in is not configured. Add <b>VITE_SUPABASE_URL</b> and <b>VITE_SUPABASE_ANON_KEY</b> to <b>.env.local</b>, then restart the app.</span></div>}
-      {initialMode === 'academic-email' && mode === 'academic-email' && <p className="login-success" role="status">Continue with your registered school email to request a verification code.</p>}
-      {mode === 'choice' && error && <p className="login-error" role="alert">{error}</p>}
-      {mode === 'choice' && <div className="login-options">
-        <button type="button" onClick={() => { setMode('administrator'); setError(''); setNotice(''); }}>
-          <span className="login-avatar principal"><ShieldCheck size={18} /></span><span><b>Administrator Login</b><small>Director and Principal · Google and email verification</small></span><ChevronRight size={17} />
-        </button>
-        <button type="button" onClick={() => { setMode('academic-email'); setError(''); setNotice(''); }}>
-          <span className="login-avatar"><UserRoundCog size={18} /></span><span><b>Academic Staff Login</b><small>Class Coordinator and Class Teacher · six-digit email code</small></span><ChevronRight size={17} />
-        </button>
-      </div>}
-      {mode === 'administrator' && <div className="login-form">
-        <p className="login-description">Only pre-authorized, active Directors and Principals can continue. A second email verification is required after Google sign-in.</p>
+      {mode === 'login' && <form className="login-form" onSubmit={signIn}>
+        <label>School email<input type="email" autoComplete="username" required value={email} onChange={(event) => setEmail(event.target.value)} /></label>
+        <label>Password<input type="password" autoComplete="current-password" required value={password} onChange={(event) => setPassword(event.target.value)} /></label>
         <label className="remember-control"><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} /> Remember this device</label>
         {error && <p className="login-error" role="alert">{error}</p>}
         {notice && <p className="login-success" role="status">{notice}</p>}
-        <button className="login-google" type="button" onClick={signInWithGoogle} disabled={busy || !authEnabled}><Chrome size={17} /><span>Continue with Google</span></button>
-        <button type="button" className="login-back" onClick={backToChoices}>Back to login options</button>
-      </div>}
+        <button className="button button-primary login-submit" type="submit" disabled={busy || !authEnabled}>{busy ? 'Signing in…' : 'Sign in'} <ChevronRight size={16} /></button>
+        <button type="button" className="forgot-password" onClick={() => { setMode('forgot-password'); setError(''); setNotice(''); }} disabled={!authEnabled}>Forgot password?</button>
+        <p className="login-invitation-note">Your role and access are set by the school administrator. Public registration is disabled.</p>
+      </form>}
       {mode === 'admin-mfa' && <form className="login-form" onSubmit={verifyCode}>
         <label>Six-digit verification code<input className="otp-input" type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))} /></label>
         {error && <p className="login-error" role="alert">{error}</p>}
@@ -670,22 +680,21 @@ function LoginScreen({
         <button type="button" className="forgot-password" onClick={requestAdminCode} disabled={busy || !authEnabled || resendCooldown > 0}>{busy ? 'Sending code…' : resendCooldown > 0 ? `Resend code in ${resendCooldown}s` : 'Send or resend verification code'}</button>
         <button type="button" className="login-back" onClick={() => { void onCancelAdminOtp(); }}>Cancel sign-in</button>
       </form>}
-      {mode === 'academic-email' && <form className="login-form" onSubmit={requestCode}>
-        <label>Registered email address<input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} /></label>
+      {mode === 'forgot-password' && <form className="login-form" onSubmit={requestPasswordReset}>
+        <label>School email<input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} /></label>
         {error && <p className="login-error" role="alert">{error}</p>}
         {notice && <p className="login-success" role="status">{notice}</p>}
-        <button className="button button-primary login-submit" type="submit" disabled={busy || !authEnabled || resendCooldown > 0}>{busy ? 'Sending code…' : resendCooldown > 0 ? `Try again in ${resendCooldown}s` : 'Send verification code'} <ChevronRight size={16} /></button>
-        <button type="button" className="login-back" onClick={backToChoices}>Back to login options</button>
+        <button className="button button-primary login-submit" type="submit" disabled={busy || !authEnabled}>{busy ? 'Sending…' : 'Send reset link'} <ChevronRight size={16} /></button>
+        <button type="button" className="login-back" onClick={backToLogin}>Back to sign in</button>
       </form>}
-      {mode === 'academic-code' && <form className="login-form" onSubmit={verifyCode}>
-        <label>Six-digit verification code<input className="otp-input" type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))} /></label>
+      {passwordMode && <form className="login-form" onSubmit={finishPasswordSetup}>
+        <label>New password<input type="password" autoComplete="new-password" minLength={10} required value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+        <label>Confirm password<input type="password" autoComplete="new-password" minLength={10} required value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} /></label>
         {error && <p className="login-error" role="alert">{error}</p>}
-        {notice && <p className="login-success" role="status">{notice}</p>}
-        <button className="button button-primary login-submit" type="submit" disabled={busy || !authEnabled}>{busy ? 'Verifying…' : 'Verify code'} <Check size={16} /></button>
-        <div className="otp-actions"><button type="button" className="login-back" onClick={() => { setMode('academic-email'); setCode(''); setError(''); setNotice(''); }}>Change email</button><button type="button" className="forgot-password" onClick={requestCode} disabled={busy || !authEnabled || resendCooldown > 0}>{resendCooldown > 0 ? `Resend code in ${resendCooldown}s` : 'Resend code'}</button></div>
+        <button className="button button-primary login-submit" type="submit" disabled={busy || !authEnabled}>{busy ? 'Saving…' : 'Save password'} <Check size={16} /></button>
       </form>}
-      {mode === 'admin-mfa' && <p className="login-invitation-note">Google sign-in alone does not grant administrator access. The code expires after five minutes and can be used once.</p>}
-      {(mode === 'academic-email' || mode === 'academic-code') && <p className="login-invitation-note">Academic accounts are invitation-only. Ask a Director or Principal to invite your registered school email.</p>}
+      {mode === 'admin-mfa' && <p className="login-invitation-note">Password sign-in alone does not grant administrator access. The code expires after five minutes and can be used once.</p>}
+      {mode === 'set-password' && <p className="login-invitation-note">This invitation is for an administrator-assigned academic staff account.</p>}
     </section>
     <footer className="login-footer">St Dominic Savio's High School <span>·</span> Academic year 2026–27</footer>
   </main>;

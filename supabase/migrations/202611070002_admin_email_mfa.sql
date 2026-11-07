@@ -255,7 +255,7 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION public.is_school_manager()
+CREATE OR REPLACE FUNCTION public.is_school_manager()
 RETURNS boolean
 LANGUAGE sql
 STABLE

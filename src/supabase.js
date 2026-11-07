@@ -57,7 +57,7 @@ export async function sessionFromAuth(authSession) {
 
   const { data: profile, error } = await supabase
     .from('staff_profiles')
-    .select('full_name, email, role, assigned_class, assigned_section, status, google_login_allowed')
+    .select('full_name, email, role, assigned_class, assigned_section, status')
     .eq('user_id', user.id)
     .maybeSingle();
 
@@ -65,30 +65,27 @@ export async function sessionFromAuth(authSession) {
   if (!profile || profile.status !== 'active' || profile.email.toLowerCase() !== user.email.toLowerCase()) return null;
 
   if (['Director', 'Principal'].includes(profile.role)) {
-    if (!profile.google_login_allowed
-      || !user.identities?.some((identity) => identity.provider === 'google')
-      || !user.email_confirmed_at) return null;
+    if (!user.email_confirmed_at || !authMethods.includes('password')) return null;
 
     const { data: mfaResult, error: mfaError } = await supabase.functions.invoke('admin-email-mfa', {
       body: { action: 'status' },
     });
     if (mfaError) throw mfaError;
-    if (!mfaResult?.verified) {
-      if (mfaResult?.pending || authMethods.includes('oauth')) return { pendingMfa: true };
-      return null;
-    }
+    if (!mfaResult?.verified) return { pendingMfa: true };
   } else if (['Class Coordinator', 'Class Teacher'].includes(profile.role)) {
     if (!Number.isInteger(profile.assigned_class)
       || profile.assigned_class < 1
       || profile.assigned_class > 12
       || (profile.role === 'Class Teacher' && !['A', 'B'].includes(profile.assigned_section))
-      || (profile.role === 'Class Coordinator' && profile.assigned_section !== null)) return null;
+      || (profile.role === 'Class Coordinator' && profile.assigned_section !== null)
+      || !user.email_confirmed_at
+      || !authMethods.includes('password')) return null;
 
-    const { data: otpResult, error: otpError } = await supabase.functions.invoke('admin-email-mfa', {
-      body: { action: 'academic-status' },
+    const { data: passwordResult, error: passwordError } = await supabase.functions.invoke('admin-email-mfa', {
+      body: { action: 'academic-password-status' },
     });
-    if (otpError) throw otpError;
-    if (!otpResult?.verified) return null;
+    if (passwordError) throw passwordError;
+    if (!passwordResult?.verified) return null;
   } else {
     return null;
   }
@@ -145,10 +142,10 @@ export async function revokeAdminEmailSession() {
   return error ? 'The administrator session could not be invalidated on the server.' : '';
 }
 
-export async function revokeAcademicEmailSession() {
+export async function revokeAcademicPasswordSession() {
   if (!supabase) return '';
   const { error } = await supabase.functions.invoke('admin-email-mfa', {
-    body: { action: 'academic-logout' },
+    body: { action: 'academic-password-logout' },
   });
   return error ? 'The academic staff session could not be invalidated on the server.' : '';
 }
