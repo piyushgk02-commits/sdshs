@@ -17,3 +17,6 @@ enabled = false
 
 [functions.manage-academic-staff]
 verify_jwt = true
+
+[functions.admin-email-mfa]
+verify_jwt = true

@@ -8,7 +8,13 @@ export const supabaseConfigured = Boolean(url && anonKey);
 let rememberSession = true;
 const authStorage = {
   getItem(key) {
-    return window.sessionStorage.getItem(key) ?? window.localStorage.getItem(key);
+    const temporarySession = window.sessionStorage.getItem(key);
+    if (temporarySession !== null) {
+      rememberSession = false;
+      return temporarySession;
+    }
+    rememberSession = true;
+    return window.localStorage.getItem(key);
   },
   setItem(key, value) {
     const storage = rememberSession ? window.localStorage : window.sessionStorage;
@@ -28,55 +34,64 @@ export const supabase = supabaseConfigured ? createClient(url, anonKey, {
   auth: { storage: authStorage },
 }) : null;
 
-export async function appSessionFromAuth(authSession) {
-  if (!authSession?.user) return null;
-  if (!supabase) return null;
-
-  const { data: profile, error } = await supabase
-    .from('staff_profiles')
-    .select('full_name, role, assigned_class, assigned_section, status')
-    .eq('user_id', authSession.user.id)
-    .maybeSingle();
-
-  if (error) throw error;
-  if (!profile || profile.status !== 'active') return null;
-  if (!['Director', 'Principal', 'Class Coordinator', 'Class Teacher'].includes(profile.role)) return null;
-
-  return {
-    id: authSession.user.id,
-    email: authSession.user.email,
-    name: profile.full_name,
-    role: profile.role,
-    assignedClass: profile.assigned_class,
-    assignedSection: profile.assigned_section,
-    signedInAt: authSession.created_at || new Date().toISOString(),
-    authenticated: true,
-  };
+function authMethodsFromToken(token) {
+  try {
+    const encoded = token.split('.')[1];
+    if (!encoded) return [];
+    const base64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+    const claims = JSON.parse(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '=')));
+    return Array.isArray(claims.amr) ? claims.amr.map((method) => method?.method) : [];
+  } catch {
+    return [];
+  }
 }
 
-export async function academicStaffSessionFromAuth(authSession) {
+export async function sessionFromAuth(authSession) {
   if (!authSession?.access_token || !authSession.user?.id || !supabase) return null;
 
   const { data: authResult, error: authError } = await supabase.auth.getUser(authSession.access_token);
   if (authError) throw authError;
   const user = authResult.user;
   if (!user || user.id !== authSession.user.id || !user.email) return null;
+  const authMethods = authMethodsFromToken(authSession.access_token);
 
   const { data: profile, error } = await supabase
     .from('staff_profiles')
-    .select('full_name, email, role, assigned_class, assigned_section, status')
+    .select('full_name, email, role, assigned_class, assigned_section, status, google_login_allowed')
     .eq('user_id', user.id)
     .maybeSingle();
 
   if (error) throw error;
-  if (!profile || profile.status !== 'active'
-    || !['Class Coordinator', 'Class Teacher'].includes(profile.role)
-    || profile.email.toLowerCase() !== user.email.toLowerCase()
-    || !Number.isInteger(profile.assigned_class)
-    || profile.assigned_class < 1
-    || profile.assigned_class > 12
-    || (profile.role === 'Class Teacher' && !['A', 'B'].includes(profile.assigned_section))
-    || (profile.role === 'Class Coordinator' && profile.assigned_section !== null)) return null;
+  if (!profile || profile.status !== 'active' || profile.email.toLowerCase() !== user.email.toLowerCase()) return null;
+
+  if (['Director', 'Principal'].includes(profile.role)) {
+    if (!profile.google_login_allowed
+      || !user.identities?.some((identity) => identity.provider === 'google')
+      || !user.email_confirmed_at) return null;
+
+    const { data: mfaResult, error: mfaError } = await supabase.functions.invoke('admin-email-mfa', {
+      body: { action: 'status' },
+    });
+    if (mfaError) throw mfaError;
+    if (!mfaResult?.verified) {
+      if (mfaResult?.pending || authMethods.includes('oauth')) return { pendingMfa: true };
+      return null;
+    }
+  } else if (['Class Coordinator', 'Class Teacher'].includes(profile.role)) {
+    if (!Number.isInteger(profile.assigned_class)
+      || profile.assigned_class < 1
+      || profile.assigned_class > 12
+      || (profile.role === 'Class Teacher' && !['A', 'B'].includes(profile.assigned_section))
+      || (profile.role === 'Class Coordinator' && profile.assigned_section !== null)) return null;
+
+    const { data: otpResult, error: otpError } = await supabase.functions.invoke('admin-email-mfa', {
+      body: { action: 'academic-status' },
+    });
+    if (otpError) throw otpError;
+    if (!otpResult?.verified) return null;
+  } else {
+    return null;
+  }
 
   return {
     id: user.id,
@@ -88,4 +103,52 @@ export async function academicStaffSessionFromAuth(authSession) {
     signedInAt: authSession.created_at || new Date().toISOString(),
     authenticated: true,
   };
+}
+
+export async function requestAdminEmailOtp() {
+  if (!supabase) return 'Secure sign-in is unavailable until Supabase is configured.';
+  const { data, error } = await supabase.functions.invoke('admin-email-mfa', {
+    body: { action: 'send' },
+  });
+  if (error) {
+    if (error.context instanceof Response) {
+      try {
+        const response = await error.context.json();
+        return response.error || 'Unable to send a verification code. Please try again later.';
+      } catch {
+        return 'Unable to send a verification code. Please try again later.';
+      }
+    }
+    return 'Unable to send a verification code. Please try again later.';
+  }
+  return data?.sent ? '' : 'Unable to send a verification code. Please try again later.';
+}
+
+export async function verifyAdminEmailOtp(code) {
+  if (!supabase) return 'Secure sign-in is unavailable until Supabase is configured.';
+  const { data, error } = await supabase.functions.invoke('admin-email-mfa', {
+    body: { action: 'verify', code },
+  });
+  if (error) return 'Unable to verify the code. Please try again.';
+  if (data?.verified) return '';
+  if (data?.reason === 'expired') return 'This code has expired. Request a new code.';
+  if (data?.reason === 'rate_limited') return 'Too many incorrect attempts. Request a new code later.';
+  if (data?.reason === 'not_authorized') return 'This administrator account is no longer authorized.';
+  return 'That code is incorrect. Check it or request a new code.';
+}
+
+export async function revokeAdminEmailSession() {
+  if (!supabase) return '';
+  const { error } = await supabase.functions.invoke('admin-email-mfa', {
+    body: { action: 'logout' },
+  });
+  return error ? 'The administrator session could not be invalidated on the server.' : '';
+}
+
+export async function revokeAcademicEmailSession() {
+  if (!supabase) return '';
+  const { error } = await supabase.functions.invoke('admin-email-mfa', {
+    body: { action: 'academic-logout' },
+  });
+  return error ? 'The academic staff session could not be invalidated on the server.' : '';
 }

@@ -1,6 +1,6 @@
 BEGIN;
 
-SELECT plan(16);
+SELECT plan(26);
 
 INSERT INTO auth.users (
   id, instance_id, aud, role, email, encrypted_password, email_confirmed_at,
@@ -13,16 +13,116 @@ VALUES
   ('00000000-0000-4000-8000-000000000104', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'rls-principal@example.invalid', '', now(), now(), now(), '{}', '{"full_name":"Test Principal"}'),
   ('00000000-0000-4000-8000-000000000105', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'rls-inactive@example.invalid', '', now(), now(), now(), '{}', '{"full_name":"Inactive Teacher"}');
 
-INSERT INTO public.staff_profiles (user_id, full_name, email, role, assigned_class, assigned_section, status)
+INSERT INTO public.staff_profiles (
+  user_id, full_name, email, role, assigned_class, assigned_section, status, google_login_allowed
+)
 VALUES
-  ('00000000-0000-4000-8000-000000000101', 'Test Teacher A', 'rls-teacher-a@example.invalid', 'Class Teacher', 1, 'A', 'active'),
-  ('00000000-0000-4000-8000-000000000102', 'Test Coordinator', 'rls-coordinator@example.invalid', 'Class Coordinator', 1, NULL, 'active'),
-  ('00000000-0000-4000-8000-000000000103', 'Test Director', 'rls-director@example.invalid', 'Director', NULL, NULL, 'active'),
-  ('00000000-0000-4000-8000-000000000104', 'Test Principal', 'rls-principal@example.invalid', 'Principal', NULL, NULL, 'active'),
-  ('00000000-0000-4000-8000-000000000105', 'Inactive Teacher', 'rls-inactive@example.invalid', 'Class Teacher', 1, 'A', 'inactive');
+  ('00000000-0000-4000-8000-000000000101', 'Test Teacher A', 'rls-teacher-a@example.invalid', 'Class Teacher', 1, 'A', 'active', false),
+  ('00000000-0000-4000-8000-000000000102', 'Test Coordinator', 'rls-coordinator@example.invalid', 'Class Coordinator', 1, NULL, 'active', false),
+  ('00000000-0000-4000-8000-000000000103', 'Test Director', 'rls-director@example.invalid', 'Director', NULL, NULL, 'active', true),
+  ('00000000-0000-4000-8000-000000000104', 'Test Principal', 'rls-principal@example.invalid', 'Principal', NULL, NULL, 'active', true),
+  ('00000000-0000-4000-8000-000000000105', 'Inactive Teacher', 'rls-inactive@example.invalid', 'Class Teacher', 1, 'A', 'inactive', false);
+
+INSERT INTO auth.identities (
+  id, user_id, identity_data, provider, provider_id, created_at, updated_at
+)
+VALUES
+  ('30000000-0000-4000-8000-000000000103', '00000000-0000-4000-8000-000000000103',
+    '{"sub":"director-google-id","email":"rls-director@example.invalid","email_verified":true}',
+    'google', 'director-google-id', now(), now()),
+  ('30000000-0000-4000-8000-000000000104', '00000000-0000-4000-8000-000000000104',
+    '{"sub":"principal-google-id","email":"rls-principal@example.invalid","email_verified":true}',
+    'google', 'principal-google-id', now(), now());
+
+INSERT INTO public.admin_email_mfa_sessions (
+  auth_session_id, user_id, verified_at, expires_at
+)
+VALUES
+  ('10000000-0000-4000-8000-000000000103', '00000000-0000-4000-8000-000000000103', now(), now() + interval '1 hour'),
+  ('10000000-0000-4000-8000-000000000104', '00000000-0000-4000-8000-000000000104', now(), now() + interval '1 hour');
+
+INSERT INTO public.academic_email_otp_sessions (
+  auth_session_id, user_id, verified_at, expires_at
+)
+VALUES
+  ('20000000-0000-4000-8000-000000000101', '00000000-0000-4000-8000-000000000101', now(), now() + interval '1 hour'),
+  ('20000000-0000-4000-8000-000000000102', '00000000-0000-4000-8000-000000000102', now(), now() + interval '1 hour');
+
+INSERT INTO public.admin_email_mfa_challenges (
+  user_id, auth_session_id, otp_hash, expires_at
+)
+VALUES (
+  '00000000-0000-4000-8000-000000000103',
+  '10000000-0000-4000-8000-000000000113',
+  'fixture-hmac',
+  now() + interval '5 minutes'
+);
+
+SELECT is(
+  public.authorize_google_admin_user_creation(
+    '{"user":{"email":"rls-director@example.invalid","app_metadata":{"provider":"google"},"user_metadata":{"email_verified":true}}}'::jsonb
+  ),
+  '{}'::jsonb,
+  'Before-user-created hook permits an existing authorized administrator'
+);
+SELECT is(
+  (public.authorize_google_admin_user_creation(
+    '{"user":{"email":"rls-teacher-a@example.invalid","app_metadata":{"provider":"google"},"user_metadata":{"email_verified":true}}}'::jsonb
+  )->'error'->>'http_code')::integer,
+  403,
+  'Before-user-created hook rejects Google sign-up for academic staff'
+);
+SELECT is(
+  (public.authorize_google_admin_user_creation(
+    '{"user":{"email":"rls-director@example.invalid","app_metadata":{"provider":"google"},"user_metadata":{"email_verified":false}}}'::jsonb
+  )->'error'->>'http_code')::integer,
+  403,
+  'Before-user-created hook rejects unverified Google email identities'
+);
+SELECT is(
+  public.verify_admin_email_mfa(
+    '00000000-0000-4000-8000-000000000103',
+    '10000000-0000-4000-8000-000000000113',
+    'wrong-code'
+  ),
+  'invalid',
+  'Administrator OTP rejects an incorrect code'
+);
+SELECT is(
+  public.verify_admin_email_mfa(
+    '00000000-0000-4000-8000-000000000103',
+    '10000000-0000-4000-8000-000000000113',
+    'fixture-hmac'
+  ),
+  'verified',
+  'Administrator OTP accepts a valid code and creates a session grant'
+);
+SELECT is(
+  (SELECT count(*) FROM public.admin_email_mfa_sessions
+    WHERE auth_session_id = '10000000-0000-4000-8000-000000000113'
+      AND user_id = '00000000-0000-4000-8000-000000000103'),
+  1::bigint,
+  'Administrator OTP grant is tied to its authenticated user and session'
+);
+SELECT is(
+  public.verify_admin_email_mfa(
+    '00000000-0000-4000-8000-000000000103',
+    '10000000-0000-4000-8000-000000000113',
+    'fixture-hmac'
+  ),
+  'expired',
+  'Administrator OTP cannot be used a second time'
+);
 
 SET LOCAL ROLE authenticated;
 SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000101', true);
+SELECT set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000101","amr":[{"method":"oauth"}],"session_id":"20000000-0000-4000-8000-000000000999"}', true);
+SELECT is(
+  (SELECT count(*) FROM public.academic_students WHERE class_number = 1 AND section = 'A'),
+  0::bigint,
+  'Google OAuth cannot be used to access an academic staff assignment'
+);
+SELECT set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000101","amr":[{"method":"otp"}],"session_id":"20000000-0000-4000-8000-000000000101"}', true);
 SELECT is(
   (SELECT count(*) FROM public.academic_students WHERE class_number = 1 AND section = 'A'),
   47::bigint,
@@ -65,6 +165,7 @@ SELECT is(
 );
 
 SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000102', true);
+SELECT set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000102","amr":[{"method":"otp"}],"session_id":"20000000-0000-4000-8000-000000000102"}', true);
 SELECT is(
   (SELECT count(*) FROM public.academic_students WHERE class_number = 1),
   105::bigint,
@@ -96,6 +197,13 @@ SELECT is(
 );
 
 SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000103', true);
+SELECT set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000103","amr":[{"method":"oauth"}],"session_id":"10000000-0000-4000-8000-000000000999"}', true);
+SELECT is(
+  (SELECT count(*) FROM public.academic_students),
+  0::bigint,
+  'Director cannot read administrator records before email OTP verification'
+);
+SELECT set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000103","amr":[{"method":"oauth"}],"session_id":"10000000-0000-4000-8000-000000000103"}', true);
 SELECT is(
   (SELECT count(*) FROM public.academic_students),
   1176::bigint,
@@ -103,6 +211,7 @@ SELECT is(
 );
 
 SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000104', true);
+SELECT set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000104","amr":[{"method":"oauth"}],"session_id":"10000000-0000-4000-8000-000000000104"}', true);
 SELECT is(
   (SELECT count(*) FROM public.academic_students),
   1176::bigint,
@@ -110,6 +219,7 @@ SELECT is(
 );
 
 SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000105', true);
+SELECT set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000105","amr":[{"method":"otp"}],"session_id":"20000000-0000-4000-8000-000000000105"}', true);
 SELECT is(
   (SELECT count(*) FROM public.academic_students),
   0::bigint,
@@ -122,6 +232,11 @@ SELECT throws_ok(
   $$SELECT count(*) FROM public.academic_students$$,
   '42501',
   'Unauthenticated visitors cannot query student records'
+);
+SELECT throws_ok(
+  $$SELECT count(*) FROM public.admin_email_mfa_sessions$$,
+  '42501',
+  'Unauthenticated visitors cannot inspect administrator verification sessions'
 );
 
 RESET ROLE;
