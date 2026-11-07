@@ -1,0 +1,8 @@
+node_modules/
+dist/
+supabase/.temp/
+.vercel/
+.env
+.env.*
+!.env.example
+!.env.admin.example

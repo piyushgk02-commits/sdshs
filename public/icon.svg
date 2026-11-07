@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="School Command icon">
+  <rect width="512" height="512" rx="110" fill="#247447"/>
+  <rect x="70" y="70" width="372" height="372" rx="44" fill="#FAF9F2" opacity="0.1"/>
+  <path d="M167 356V182h42v174h-42Zm75-118h93c22 0 39 17 39 38v36c0 21-17 38-39 38h-61v38h-32V238Zm32 28v46h57c7 0 13-5 13-12v-22c0-7-6-12-13-12h-57Z" fill="#FAF9F2"/>
+  <circle cx="397" cy="143" r="32" fill="#E5C96D"/>
+</svg>

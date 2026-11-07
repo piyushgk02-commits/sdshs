@@ -1,0 +1,19 @@
+project_id = "sdshs"
+
+[api]
+enabled = true
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+
+[db.migrations]
+enabled = true
+
+[db.seed]
+enabled = false
+
+[functions.manage-academic-staff]
+verify_jwt = true

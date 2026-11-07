@@ -1,0 +1,19 @@
+{
+  "name": "SCHOOL COMMAND",
+  "short_name": "SCHOOL COMMAND",
+  "description": "St Dominic Savio’s High School enterprise ERP and operations workspace.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#FAF9F2",
+  "theme_color": "#247447",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+.login-back{justify-self:center;padding:5px;border:0;background:transparent;color:#247447;font-size:11px;font-weight:600;cursor:pointer}
+.login-back:hover,.forgot-password:hover:not(:disabled){color:#195e38;text-decoration:underline}
+.login-back:disabled,.forgot-password:disabled{opacity:.55;cursor:not-allowed}
+.otp-input{font-size:20px!important;font-weight:700;letter-spacing:.42em;text-align:center}
+.otp-actions{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.login-invitation-note{margin:18px 0 0;padding-top:14px;border-top:1px solid #edf0e9;color:#747b72;font-size:10px;line-height:1.55;text-align:center}
+@media(max-width:380px){.otp-actions{align-items:flex-start;flex-direction:column;gap:6px}.otp-input{letter-spacing:.32em}}
